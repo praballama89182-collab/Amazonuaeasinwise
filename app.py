@@ -181,4 +181,3 @@ if ad_file and biz_file:
     st.sidebar.download_button("📥 Download Master Report", data=output.getvalue(), file_name="Amazon_ASIN_Audit_Master.xlsx", use_container_width=True)
 else:
     st.info("Upload your Ad and Business reports to begin the audit.")
-    

@@ -42,20 +42,27 @@ def find_robust_col(df, keywords, exclude=['acos', 'roas', 'cpc', 'ctr', 'rate',
     return None
 
 st.title("🎯 FINAL AMAZON ASIN WISE")
-st.info("Verified Framework: Campaign-First View, Absolute Totals, and ASIN-Wise Velocity (DRR)")
+st.info("Verified Framework: Campaign-First View, Absolute Totals, Inventory Integration, and 30-Day DRR Velocity")
 
 st.sidebar.header("Upload Reports")
 ad_file = st.sidebar.file_uploader("1. Ad Report (CSV or Excel)", type=["csv", "xlsx", "xls"])
 biz_file = st.sidebar.file_uploader("2. Business Report (CSV or Excel)", type=["csv", "xlsx", "xls"])
+inv_file = st.sidebar.file_uploader("3. Inventory Report (.txt or CSV)", type=["txt", "csv"])
 
 if ad_file and biz_file:
-    def load_df(file):
-        df = pd.read_csv(file) if file.name.endswith('.csv') else pd.read_excel(file)
+    def load_df(file, sep=None):
+        if file.name.endswith('.csv'):
+            df = pd.read_csv(file)
+        elif file.name.endswith('.txt'):
+            df = pd.read_csv(file, sep='\t')
+        else:
+            df = pd.read_excel(file)
         df.columns = [str(c).strip() for c in df.columns]
         return df
 
     ad_df_raw = load_df(ad_file)
     biz_df_raw = load_df(biz_file)
+    inv_df_raw = load_df(inv_file) if inv_file else None
 
     # 1. Column Detection & Normalization
     ad_asin_col = find_robust_col(ad_df_raw, ['Advertised ASIN', 'ASIN'])
@@ -75,7 +82,16 @@ if ad_file and biz_file:
     biz_df_raw[biz_sales_col] = biz_df_raw[biz_sales_col].apply(clean_numeric)
     biz_df_raw['Brand'] = biz_df_raw[biz_title_col].apply(get_brand_robust)
 
-    # 3. Aggregation Logic
+    # 3. Process Inventory Data if exists
+    inv_summary = None
+    if inv_df_raw is not None:
+        inv_asin_col = find_robust_col(inv_df_raw, ['asin'])
+        inv_qty_col = find_robust_col(inv_df_raw, ['Quantity Available', 'Available', 'Quantity'])
+        if inv_asin_col and inv_qty_col:
+            inv_summary = inv_df_raw.groupby(inv_asin_col)[inv_qty_col].sum().reset_index()
+            inv_summary.columns = ['ASIN_INV', 'Available_Inventory']
+
+    # 4. Aggregation Logic
     # Group by Campaign + ASIN for table view
     ad_camp_summary = ad_df_raw.groupby(['Campaign Name', ad_asin_col]).agg({
         ad_spend_col: 'sum', ad_sales_col: 'sum', ad_clicks_col: 'sum', 
@@ -85,12 +101,19 @@ if ad_file and biz_file:
     # Per-ASIN Ad Total for Organic isolation
     ad_asin_total = ad_df_raw.groupby(ad_asin_col).agg({ad_sales_col: 'sum'}).rename(columns={ad_sales_col: 'ASIN_AD_TOTAL'}).reset_index()
 
-    # 4. Final Merge
+    # 5. Final Merge
     merged_df = pd.merge(biz_df_raw, ad_camp_summary, left_on=biz_asin_col, right_on=ad_asin_col, how='left')
     merged_df = pd.merge(merged_df, ad_asin_total, on=ad_asin_col, how='left').fillna(0)
+    
+    # Merge Inventory
+    if inv_summary is not None:
+        merged_df = pd.merge(merged_df, inv_summary, left_on=biz_asin_col, right_on='ASIN_INV', how='left').fillna(0)
+    else:
+        merged_df['Available_Inventory'] = "No File Uploaded"
+
     merged_df['Campaign Name'] = merged_df['Campaign Name'].apply(lambda x: x if x != 0 and str(x).strip() != "" else "None")
 
-    # 5. Calculation Logic
+    # 6. Calculation Logic
     merged_df['Organic Sales'] = merged_df[biz_sales_col] - merged_df['ASIN_AD_TOTAL']
     merged_df['DRR'] = merged_df[biz_sales_col] / 30
     merged_df['Ad Contribution %'] = (merged_df['ASIN_AD_TOTAL'] / merged_df[biz_sales_col]).replace([np.inf, -np.inf], 0).fillna(0)
@@ -107,7 +130,7 @@ if ad_file and biz_file:
     table_df = merged_df.rename(columns={
         'Campaign Name': 'Campaign', biz_asin_col: 'ASIN', biz_title_col: 'Item Name',
         biz_sales_col: 'Total Sales', ad_sales_col: 'Ad Sales (Campaign)', ad_spend_col: 'Spend',
-        ad_imps_col: 'Impressions', ad_clicks_col: 'Clicks'
+        ad_imps_col: 'Impressions', ad_clicks_col: 'Clicks', 'Available_Inventory': 'Inventory'
     })
 
     tabs = st.tabs(["🌍 Portfolio Overview"] + sorted(list(BRAND_MAP.values())))
@@ -151,7 +174,7 @@ if ad_file and biz_file:
         st.subheader("Global Portfolio Overview")
         display_metrics_dashboard(ad_df_raw, biz_df_raw)
         st.divider()
-        cols = ['Campaign', 'ASIN', 'Item Name', 'Total Sales', 'DRR', 'Ad Sales (Campaign)', 'Spend', 'Organic Sales', 'Ad Contribution %', 'ROAS', 'ACOS', 'TACOS', 'CTR', 'CVR', 'Impressions', 'Clicks']
+        cols = ['Campaign', 'ASIN', 'Item Name', 'Inventory', 'Total Sales', 'DRR', 'Ad Sales (Campaign)', 'Spend', 'Organic Sales', 'Ad Contribution %', 'ROAS', 'ACOS', 'TACOS', 'CTR', 'CVR', 'Impressions', 'Clicks']
         st.dataframe(table_df[cols].sort_values(by='Total Sales', ascending=False), hide_index=True, use_container_width=True)
 
     for i, brand in enumerate(sorted(BRAND_MAP.values())):
@@ -179,4 +202,4 @@ if ad_file and biz_file:
                 b_sheet[cols].to_excel(writer, sheet_name=b_name[:31], index=False)
     st.sidebar.download_button("📥 Download Master Report", data=output.getvalue(), file_name="Amazon_ASIN_Audit_Master.xlsx", use_container_width=True)
 else:
-    st.info("Upload your Ad and Business reports to begin the audit.")
+    st.info("Upload your Ad, Business, and Inventory reports to begin the audit.")

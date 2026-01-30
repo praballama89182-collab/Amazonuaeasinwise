@@ -24,7 +24,7 @@ def clean_numeric(val):
     return val if isinstance(val, (int, float)) else 0.0
 
 def get_brand_robust(name):
-    """Maps items to core brands using title patterns and prefixes."""
+    """Maps items to core brands using title patterns."""
     if pd.isna(name): return "Unmapped"
     n = str(name).upper().replace('’', "'").strip()
     for prefix, full_name in BRAND_MAP.items():
@@ -43,7 +43,7 @@ def find_robust_col(df, keywords, exclude=['acos', 'roas', 'cpc', 'ctr', 'rate',
     return None
 
 st.title("🎯 Final Amazon ASIN Audit")
-st.info("Compatible with CSV & Excel. Includes Campaign Mapping, DRR, and Efficiency Metrics.")
+st.info("Verified Data: ASIN-level contribution, Campaign Mapping, and Velocity (DRR)")
 
 st.sidebar.header("Upload Reports")
 ad_file = st.sidebar.file_uploader("1. Ad Report (CSV or Excel)", type=["csv", "xlsx", "xls"])
@@ -51,7 +51,6 @@ biz_file = st.sidebar.file_uploader("2. Business Report (CSV or Excel)", type=["
 
 if ad_file and biz_file:
     def load_flexible_df(file):
-        """Loads CSV or Excel based on file extension."""
         if file.name.endswith('.csv'):
             df = pd.read_csv(file)
         else:
@@ -93,48 +92,58 @@ if ad_file and biz_file:
         'Campaign Name': lambda x: ", ".join(sorted(set(str(v) for v in x if pd.notna(v))))
     }).reset_index()
 
-    # 3. Final Merge (Rename to ASIN)
+    # 3. Final Merge & Standardization
     final_df = pd.merge(biz_df, ad_summary, left_on=biz_asin_col, right_on=ad_asin_col, how='left').fillna(0)
-    final_df['Campaign Name'] = final_df['Campaign Name'].apply(lambda x: x if x != 0 and str(x).strip() != "" else "No Active Ads")
     
-    # 4. Calculation Logic
-    final_df['Organic Sales'] = final_df[biz_sales_col] - final_df[ad_sales_col]
-    final_df['DRR'] = final_df[biz_sales_col] / 30
-    final_df['Ad Contribution %'] = (final_df[ad_sales_col] / final_df[biz_sales_col]).replace([np.inf, -np.inf], 0).fillna(0)
-    final_df['ROAS'] = (final_df[ad_sales_col] / final_df[ad_spend_col]).replace([np.inf, -np.inf], 0).fillna(0)
-    final_df['ACOS'] = (final_df[ad_spend_col] / final_df[ad_sales_col]).replace([np.inf, -np.inf], 0).fillna(0)
-    final_df['CTR'] = (final_df[ad_clicks_col] / final_df[ad_imps_col]).replace([np.inf, -np.inf], 0).fillna(0)
-    final_df['CVR'] = (final_df[ad_orders_col] / final_df[ad_clicks_col]).replace([np.inf, -np.inf], 0).fillna(0)
-
+    # Standardize column names IMMEDIATELY after merge
     final_df = final_df.rename(columns={
-        biz_asin_col: 'ASIN', biz_title_col: 'Item Name', biz_sales_col: 'Total Sales', 
-        ad_sales_col: 'Ad Sales', ad_spend_col: 'Ad Spend', 'Campaign Name': 'Associated Campaigns'
+        biz_asin_col: 'ASIN', 
+        biz_title_col: 'Item Name', 
+        biz_sales_col: 'Total Sales', 
+        ad_sales_col: 'Ad Sales', 
+        ad_spend_col: 'Ad Spend',
+        ad_orders_col: 'Orders',
+        ad_clicks_col: 'Clicks',
+        ad_imps_col: 'Impressions',
+        'Campaign Name': 'Associated Campaigns'
     })
+
+    # Ensure Campaigns column is readable
+    final_df['Associated Campaigns'] = final_df['Associated Campaigns'].apply(lambda x: x if x != 0 and str(x).strip() != "" else "No Active Ads")
+    
+    # 4. KPI Logic
+    final_df['Organic Sales'] = final_df['Total Sales'] - final_df['Ad Sales']
+    final_df['DRR'] = final_df['Total Sales'] / 30
+    final_df['Ad Contribution %'] = (final_df['Ad Sales'] / final_df['Total Sales']).replace([np.inf, -np.inf], 0).fillna(0)
+    final_df['ROAS'] = (final_df['Ad Sales'] / final_df['Ad Spend']).replace([np.inf, -np.inf], 0).fillna(0)
+    final_df['ACOS'] = (final_df['Ad Spend'] / final_df['Ad Sales']).replace([np.inf, -np.inf], 0).fillna(0)
+    final_df['CTR'] = (final_df['Clicks'] / final_df['Impressions']).replace([np.inf, -np.inf], 0).fillna(0)
+    final_df['CVR'] = (final_df['Orders'] / final_df['Clicks']).replace([np.inf, -np.inf], 0).fillna(0)
 
     tabs = st.tabs(["🌍 Portfolio Overview"] + sorted(list(BRAND_MAP.values())))
 
     with tabs[0]:
-        st.subheader("Global ASIN Summary (30 Days)")
+        st.subheader("Global Portfolio Overview (30 Days)")
         totals = final_df.select_dtypes(include=[np.number]).sum()
         
-        # Portfolio aggregate rates
+        # Portfolio Efficiency
         p_roas = totals['Ad Sales'] / totals['Ad Spend'] if totals['Ad Spend'] > 0 else 0
         p_acos = totals['Ad Spend'] / totals['Ad Sales'] if totals['Ad Sales'] > 0 else 0
         p_ctr = totals['Clicks'] / totals['Impressions'] if totals['Impressions'] > 0 else 0
         p_cvr = totals['Orders'] / totals['Clicks'] if totals['Clicks'] > 0 else 0
 
-        row1 = st.columns(5)
-        row1[0].metric("Total Sales", f"{totals['Total Sales']:,.2f}")
-        row1[1].metric("Ad Sales", f"{totals['Ad Sales']:,.2f}")
-        row1[2].metric("Organic Sales", f"{totals['Organic Sales']:,.2f}")
-        row1[3].metric("Portfolio DRR", f"{totals['DRR']:,.2f}")
-        row1[4].metric("Ad Contrib.", f"{(totals['Ad Sales']/totals['Total Sales']):.1%}" if totals['Total Sales'] > 0 else "0%")
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Total Sales", f"{totals['Total Sales']:,.2f}")
+        c2.metric("Ad Sales", f"{totals['Ad Sales']:,.2f}")
+        c3.metric("Organic Sales", f"{totals['Organic Sales']:,.2f}")
+        c4.metric("Portfolio DRR", f"{totals['DRR']:,.2f}")
+        c5.metric("Ad Contrib %", f"{(totals['Ad Sales']/totals['Total Sales']):.1%}" if totals['Total Sales'] > 0 else "0%")
 
-        row2 = st.columns(4)
-        row2[0].metric("Portfolio ROAS", f"{p_roas:.2f}")
-        row2[1].metric("Portfolio ACOS", f"{p_acos:.1%}")
-        row2[2].metric("Portfolio CTR", f"{p_ctr:.2%}")
-        row2[3].metric("Portfolio CVR", f"{p_cvr:.2%}")
+        e1, e2, e3, e4 = st.columns(4)
+        e1.metric("Portfolio ROAS", f"{p_roas:.2f}")
+        e2.metric("Portfolio ACOS", f"{p_acos:.1%}")
+        e3.metric("Portfolio CTR", f"{p_ctr:.2%}")
+        e4.metric("Portfolio CVR", f"{p_cvr:.2%}")
         
         st.divider()
         st.dataframe(final_df.sort_values(by='Total Sales', ascending=False), hide_index=True, use_container_width=True)
@@ -149,7 +158,7 @@ if ad_file and biz_file:
             else:
                 st.warning(f"No products found for {brand}.")
 
-    # Export
+    # Multi-Sheet Export
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         final_df.to_excel(writer, sheet_name='OVERVIEW', index=False)
@@ -157,7 +166,7 @@ if ad_file and biz_file:
             b_sheet = final_df[final_df['Brand'] == b_name]
             if not b_sheet.empty:
                 b_sheet.to_excel(writer, sheet_name=b_name[:31], index=False)
-    st.sidebar.download_button("📥 Download Master Report", data=output.getvalue(), file_name="Amazon_ASIN_Performance_Audit.xlsx", use_container_width=True)
+    st.sidebar.download_button("📥 Download Master Report", data=output.getvalue(), file_name="Amazon_ASIN_Audit.xlsx", use_container_width=True)
 
 else:
-    st.info("Upload your reports (CSV/Excel) to generate the audit.")
+    st.info("Upload your reports (CSV/Excel) to generate the ASIN performance audit.")

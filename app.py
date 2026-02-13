@@ -51,14 +51,13 @@ st.title("🎯 Final Amazon Master Audit")
 
 # Sidebar
 st.sidebar.header("📁 Upload Reports")
-# Accepts all Excel types and CSV
 file_types = ["csv", "xlsx", "xls", "xlsm", "xlsb"]
 ad_f = st.sidebar.file_uploader("1. Ad Report", type=file_types)
 biz_f = st.sidebar.file_uploader("2. Business Report", type=file_types)
 inv_f = st.sidebar.file_uploader("3. Inventory Report (.txt)", type=["txt"])
 
 if ad_f and biz_f and inv_f:
-    with st.spinner('Calculating ACOS and TACOS for all brands...'):
+    with st.spinner('Syncing data and filtering sellable stock...'):
         # Load
         df_ad = pd.read_csv(ad_f) if ad_f.name.endswith('.csv') else pd.read_excel(ad_f)
         df_biz = pd.read_csv(biz_f) if biz_f.name.endswith('.csv') else pd.read_excel(biz_f)
@@ -69,73 +68,81 @@ if ad_f and biz_f and inv_f:
         df_biz.columns = [str(c).strip() for c in df_biz.columns]
         df_inv.columns = [str(c).strip() for c in df_inv.columns]
 
-        # 1. Inventory: Pivot by ASIN
+        # 1. Inventory: Aggregating SELLABLE ASINs only
         i_asin = find_col(df_inv, ['asin'])
         i_qty = find_col(df_inv, ['quantity available'])
-        inv_pivot = df_inv.groupby(i_asin)[i_qty].sum().reset_index()
-        inv_pivot.columns = ['ASIN_KEY', 'Stock']
+        i_cond = find_col(df_inv, ['warehouse-condition-code'])
+        
+        # Filter for SELLABLE
+        df_inv_sell = df_inv[df_inv[i_cond].astype(str).str.strip().str.upper() == 'SELLABLE']
+        inv_pivot = df_inv_sell.groupby(i_asin)[i_qty].sum().reset_index()
+        inv_pivot.columns = ['ASIN_KEY_INV', 'Stock']
 
         # 2. Metrics Detection
         b_asin = find_col(df_biz, ['child asin', 'asin'])
         b_sales = find_col(df_biz, ['ordered product sales', 'revenue'])
         b_title = find_col(df_biz, ['title', 'item name'])
-        
         a_asin = find_col(df_ad, ['advertised asin'])
-        a_sales = find_col(df_ad, ['7 day total sales']) # Full sales (AED 3,324.65)
+        a_sales = find_col(df_ad, ['7 day total sales']) 
         a_spend = find_col(df_ad, ['spend'])
         a_camp = find_col(df_ad, ['campaign name'])
 
-        # 3. Numeric Cleaning
+        # 3. Clean
         df_biz[b_sales] = df_biz[b_sales].apply(clean_numeric)
         df_ad[a_sales] = df_ad[a_sales].apply(clean_numeric)
         df_ad[a_spend] = df_ad[a_spend].apply(clean_numeric)
 
-        # 4. Aggregation & Full Outer Merge
+        # 4. Three-Way Outer Merge (Ensure 100% Stock Capture)
         ad_agg = df_ad.groupby(a_asin).agg({a_sales: 'sum', a_spend: 'sum', a_camp: 'first'}).reset_index()
         
+        # Merge Biz + Ads
         merged = pd.merge(df_biz, ad_agg, left_on=b_asin, right_on=a_asin, how='outer')
-        merged['Final_ASIN'] = merged[b_asin].fillna(merged[a_asin])
-        merged = pd.merge(merged, inv_pivot, left_on='Final_ASIN', right_on='ASIN_KEY', how='left').fillna(0)
+        merged['Master_ASIN'] = merged[b_asin].fillna(merged[a_asin])
+        
+        # Merge with Inventory
+        merged = pd.merge(merged, inv_pivot, left_on='Master_ASIN', right_on='ASIN_KEY_INV', how='outer', suffixes=('', '_inv'))
+        merged['Final_ASIN'] = merged['Master_ASIN'].fillna(merged['ASIN_KEY_INV'])
 
-        # 5. Final Brand Mapping & Ratios
+        # 5. Mapping & Calculations
         merged['Brand'] = merged.apply(lambda r: get_brand_robust(r, b_title, None, a_camp), axis=1)
         merged['ACOS'] = (merged[a_spend] / merged[a_sales]).replace([np.inf, -np.inf], 0).fillna(0)
         merged['TACOS'] = (merged[a_spend] / merged[b_sales]).replace([np.inf, -np.inf], 0).fillna(0)
+        
+        # Fill numeric NaNs
+        for c in [b_sales, a_sales, a_spend, 'Stock']:
+            merged[c] = merged[c].fillna(0)
 
     # --- TABS ---
     tabs = st.tabs(["🌎 Global Portfolio"] + list(BRAND_MAP.values()))
 
-    # Tab 1: Global Summary
     with tabs[0]:
-        st.subheader("Global Stock & Performance")
+        st.subheader("Global Sellable Stock & Performance")
         m1, m2, m3, m4, m5 = st.columns(5)
         t_rev, t_ad, t_spend = merged[b_sales].sum(), merged[a_sales].sum(), merged[a_spend].sum()
         m1.metric("Total Sales", f"AED {t_rev:,.2f}")
         m2.metric("Ad Sales", f"AED {t_ad:,.2f}")
-        m3.metric("Ad Spend", f"AED {t_spend:,.2f}")
-        m4.metric("Global ACOS", f"{(t_spend/t_ad if t_ad > 0 else 0):.2%}")
-        m5.metric("Global TACOS", f"{(t_spend/t_rev if t_rev > 0 else 0):.2%}")
+        m3.metric("Global ACOS", f"{(t_spend/t_ad if t_ad > 0 else 0):.2%}")
+        m4.metric("Global TACOS", f"{(t_spend/t_rev if t_rev > 0 else 0):.2%}")
+        m5.metric("Sellable Stock", f"{merged['Stock'].sum():,.0f} Units")
         
         brand_summary = merged.groupby('Brand').agg({b_sales: 'sum', a_sales: 'sum', a_spend: 'sum', 'Stock': 'sum'}).reset_index()
-        brand_summary['ACOS'] = (brand_summary[a_spend] / brand_summary[a_sales]).fillna(0)
-        brand_summary['TACOS'] = (brand_summary[a_spend] / brand_summary[b_sales]).fillna(0)
-        st.dataframe(brand_summary.sort_values(by=b_sales, ascending=False), use_container_width=True, hide_index=True)
+        st.dataframe(brand_summary.sort_values(by=b_sales, ascending=False).style.format({
+            b_sales: '{:,.2f}', a_sales: '{:,.2f}', a_spend: '{:,.2f}', 'Stock': '{:,.0f}'
+        }), use_container_width=True, hide_index=True)
 
-    # Individual Brand Tabs
     for idx, brand_name in enumerate(BRAND_MAP.values(), start=1):
         with tabs[idx]:
             b_data = merged[merged['Brand'] == brand_name]
-            if not b_data.empty:
-                st.subheader(f"{brand_name} Performance")
-                k1, k2, k3, k4, k5 = st.columns(5)
-                b_rev, b_ad, b_sp = b_data[b_sales].sum(), b_data[a_sales].sum(), b_data[a_spend].sum()
-                k1.metric("Total Sales", f"AED {b_rev:,.2f}")
-                k2.metric("Ad Sales", f"AED {b_ad:,.2f}")
-                k3.metric("ACOS", f"{(b_sp/b_ad if b_ad > 0 else 0):.2%}")
-                k4.metric("TACOS", f"{(b_sp/b_rev if b_rev > 0 else 0):.2%}")
-                k5.metric("Stock", f"{b_data['Stock'].sum():,.0f}")
-                
-                st.dataframe(b_data[['Final_ASIN', b_title, 'Stock', b_sales, a_sales, a_spend, 'ACOS', 'TACOS']], use_container_width=True, hide_index=True)
+            st.subheader(f"{brand_name} Metrics")
+            k1, k2, k3, k4, k5 = st.columns(5)
+            br_rev, br_ad, br_sp = b_data[b_sales].sum(), b_data[a_sales].sum(), b_data[a_spend].sum()
+            k1.metric("Total Sales", f"AED {br_rev:,.2f}")
+            k2.metric("Ad Sales", f"AED {br_ad:,.2f}")
+            k3.metric("ACOS", f"{(br_sp/br_ad if br_ad > 0 else 0):.2%}")
+            k4.metric("TACOS", f"{(br_sp/br_rev if br_rev > 0 else 0):.2%}")
+            k5.metric("Sellable Stock", f"{b_data['Stock'].sum():,.0f}")
+            
+            st.dataframe(b_data[['Final_ASIN', b_title, 'Stock', b_sales, a_sales, a_spend, 'ACOS', 'TACOS']], use_container_width=True, hide_index=True)
 
     # Export
     output = BytesIO()
@@ -144,4 +151,4 @@ if ad_f and biz_f and inv_f:
     st.sidebar.download_button("📥 Download Final Audit", data=output.getvalue(), file_name="Amazon_Performance_Master.xlsx")
 
 else:
-    st.info("Upload your reports to generate the finalized dashboard with ACOS and TACOS.")
+    st.info("Upload your reports to generate the dashboard with SELLABLE inventory only.")

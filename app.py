@@ -54,7 +54,7 @@ if ad_file and biz_file:
         if file.name.endswith('.csv'):
             return pd.read_csv(file)
         elif file.name.endswith('.txt'):
-            # Standard Amazon .txt reports are Tab-Separated
+            # Tab-separated for Amazon .txt reports
             return pd.read_csv(file, sep='\t')
         else:
             return pd.read_excel(file)
@@ -76,18 +76,20 @@ if ad_file and biz_file:
     ad_spend_col = find_robust_col(ad_df_raw, ['Spend', 'Cost'])
     biz_sales_col = find_robust_col(biz_df_raw, ['Ordered Product Sales', 'Revenue'])
 
-    # 2. Advanced Inventory Processing
+    # 2. Inventory Processing (FIXED FOR ASIN MAPPING)
     inv_summary = None
     if inv_df_raw is not None:
+        # Standardize inventory columns to lowercase
         inv_df_raw.columns = [str(c).strip().lower() for c in inv_df_raw.columns]
-        # Match ASIN if available, fallback to SKU
-        inv_id_col = find_robust_col(inv_df_raw, ['asin', 'sku', 'seller-sku'])
-        inv_qty_col = find_robust_col(inv_df_raw, ['quantity', 'qty', 'available'])
         
-        if inv_id_col and inv_qty_col:
-            # Aggregate by ASIN/SKU and handle missing quantities (NaN -> 0)
-            inv_summary = inv_df_raw.groupby(inv_id_col)[inv_qty_col].sum().fillna(0).reset_index()
-            inv_summary.columns = ['INV_KEY', 'Available_Inventory']
+        # Mapping specifically based on your .txt headers: 'asin' and 'quantity available'
+        inv_asin_key = 'asin'
+        inv_qty_key = 'quantity available'
+        
+        if inv_asin_key in inv_df_raw.columns and inv_qty_key in inv_df_raw.columns:
+            # Aggregate by ASIN: Summing stock for all SKUs tied to the same ASIN 
+            inv_summary = inv_df_raw.groupby(inv_asin_key)[inv_qty_key].sum().fillna(0).reset_index()
+            inv_summary.columns = ['INV_ASIN', 'Available_Inventory']
 
     # 3. Clean Metrics
     if ad_sales_col: ad_df_raw[ad_sales_col] = ad_df_raw[ad_sales_col].apply(clean_numeric)
@@ -95,26 +97,21 @@ if ad_file and biz_file:
     if biz_sales_col: biz_df_raw[biz_sales_col] = biz_df_raw[biz_sales_col].apply(clean_numeric)
     biz_df_raw['Brand'] = biz_df_raw[biz_title_col].apply(get_brand_robust) if biz_title_col else "Unmapped"
 
-    # 4. Aggregation
+    # 4. Aggregation of Ad Data
     ad_asin_total = ad_df_raw.groupby(ad_asin_col).agg({
         ad_sales_col: 'sum', ad_spend_col: 'sum'
     }).reset_index()
 
-    # 5. Merge Strategy
+    # 5. Merge Strategy (ASIN to ASIN)
+    # Join Biz Report to Ad Report
     merged_df = pd.merge(biz_df_raw, ad_asin_total, left_on=biz_asin_col, right_on=ad_asin_col, how='left').fillna(0)
     
+    # Join Inventory strictly by ASIN
     if inv_summary is not None:
-        # We join inventory to the business report's ASIN
-        merged_df = pd.merge(merged_df, inv_summary, left_on=biz_asin_col, right_on='INV_KEY', how='left')
-        # If ASIN didn't match, we try SKU as a fallback if 'sku' column exists in business report
-        biz_sku_col = find_robust_col(biz_df_raw, ['sku', 'seller-sku'])
-        if biz_sku_col and merged_df['Available_Inventory'].isna().any():
-            sku_map = inv_summary.set_index('INV_KEY')['Available_Inventory']
-            merged_df['Available_Inventory'] = merged_df['Available_Inventory'].fillna(merged_df[biz_sku_col].map(sku_map))
-        
-        merged_df['Available_Inventory'] = merged_df['Available_Inventory'].fillna(0)
+        merged_df = pd.merge(merged_df, inv_summary, left_on=biz_asin_col, right_on='INV_ASIN', how='left')
+        merged_df['Available_Inventory'] = merged_df['Available_Inventory'].fillna(0).astype(int)
     else:
-        merged_df['Available_Inventory'] = "No File"
+        merged_df['Available_Inventory'] = 0
 
     # 6. Final Calculations
     merged_df['Organic Sales'] = merged_df[biz_sales_col] - merged_df[ad_sales_col]
@@ -124,10 +121,15 @@ if ad_file and biz_file:
 
     # 7. UI Display
     table_df = merged_df.rename(columns={
-        biz_asin_col: 'ASIN', biz_title_col: 'Item Name', biz_sales_col: 'Total Sales',
-        ad_sales_col: 'Ad Sales', ad_spend_col: 'Ad Spend', 'Available_Inventory': 'Stock'
+        biz_asin_col: 'ASIN', 
+        biz_title_col: 'Item Name', 
+        biz_sales_col: 'Total Sales',
+        ad_sales_col: 'Ad Sales', 
+        ad_spend_col: 'Ad Spend', 
+        'Available_Inventory': 'Stock'
     })
 
+    # Prepare specific columns for display
     cols = ['ASIN', 'Item Name', 'Stock', 'Total Sales', 'DRR', 'Ad Sales', 'Ad Spend', 'Organic Sales', 'Ad Contribution %', 'TACOS']
     
     st.subheader("Final ASIN Audit")

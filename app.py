@@ -3,9 +3,9 @@ import pandas as pd
 import numpy as np
 from io import BytesIO
 
-st.set_page_config(page_title="FINAL AMAZON ASIN WISE", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="AMAZON MASTER AUDIT", page_icon="📈", layout="wide")
 
-# Brand Configuration
+# 1. Configuration & Mapping
 BRAND_MAP = {
     'MA': 'Maison de l’Avenir',
     'CL': 'Creation Lamis',
@@ -16,7 +16,6 @@ BRAND_MAP = {
 }
 
 def clean_numeric(val):
-    """Deep clean of currency, commas, and non-breaking spaces."""
     if isinstance(val, str):
         cleaned = val.replace('AED', '').replace('$', '').replace('\xa0', '').replace(',', '').strip()
         try: return pd.to_numeric(cleaned)
@@ -32,114 +31,121 @@ def get_brand_robust(name):
             return full_name
     return "Unmapped"
 
-def find_robust_col(df, keywords, exclude=['acos', 'roas', 'cpc', 'ctr', 'rate', 'new-to-brand']):
-    """Strips hidden spaces from headers to ensure matching."""
+def find_robust_col(df, keywords):
     for col in df.columns:
         col_clean = str(col).strip().lower()
-        if any(kw.lower() == col_clean or kw.lower() in col_clean for kw in keywords):
-            if not any(ex.lower() in col_clean for ex in exclude):
-                return col
+        if any(kw.lower() in col_clean for kw in keywords):
+            return col
     return None
 
-st.title("🎯 FINAL AMAZON ASIN WISE")
-st.info("Verified Framework: Optimized for .txt Inventory Reports (ASIN/SKU Mapping)")
+# --- UI Setup ---
+st.title("🚀 Amazon Master Performance Audit")
+st.markdown("---")
 
-st.sidebar.header("Upload Reports")
-ad_file = st.sidebar.file_uploader("1. Ad Report (CSV or Excel)", type=["csv", "xlsx", "xls"])
-biz_file = st.sidebar.file_uploader("2. Business Report (CSV or Excel)", type=["csv", "xlsx", "xls"])
-inv_file = st.sidebar.file_uploader("3. Inventory Report (.txt or CSV)", type=["txt", "csv"])
+st.sidebar.header("📁 Upload Center")
+ad_file = st.sidebar.file_uploader("1. Ad Report (Spon. Products)", type=["csv", "xlsx"])
+biz_file = st.sidebar.file_uploader("2. Business Report (Child ASIN)", type=["csv", "xlsx"])
+inv_file = st.sidebar.file_uploader("3. Inventory Report (.txt)", type=["txt"])
 
-if ad_file and biz_file:
-    def load_df(file):
-        if file.name.endswith('.csv'):
-            return pd.read_csv(file)
-        elif file.name.endswith('.txt'):
-            # Tab-separated for Amazon .txt reports
-            return pd.read_csv(file, sep='\t')
-        else:
-            return pd.read_excel(file)
+if ad_file and biz_file and inv_file:
+    # Load Data
+    with st.spinner('Processing reports...'):
+        ad_df = pd.read_csv(ad_file) if ad_file.name.endswith('.csv') else pd.read_excel(ad_file)
+        biz_df = pd.read_csv(biz_file) if biz_file.name.endswith('.csv') else pd.read_excel(biz_file)
+        inv_df = pd.read_csv(inv_file, sep='\t')
 
-    ad_df_raw = load_df(ad_file)
-    biz_df_raw = load_df(biz_file)
-    inv_df_raw = load_df(inv_file) if inv_file else None
+        # 1. Inventory Prep
+        inv_df.columns = [c.strip().lower() for c in inv_df.columns]
+        inv_summary = inv_df.groupby('asin')['quantity available'].sum().reset_index()
+        inv_summary.columns = ['ASIN_KEY', 'Stock']
 
-    # Standardize column cleaning
-    ad_df_raw.columns = [str(c).strip() for c in ad_df_raw.columns]
-    biz_df_raw.columns = [str(c).strip() for c in biz_df_raw.columns]
-
-    # 1. Column Detection
-    ad_asin_col = find_robust_col(ad_df_raw, ['Advertised ASIN', 'ASIN'])
-    biz_asin_col = find_robust_col(biz_df_raw, ['(Child) ASIN', 'Child ASIN', 'ASIN'])
-    biz_title_col = find_robust_col(biz_df_raw, ['Title', 'Item Name'])
-    
-    ad_sales_col = find_robust_col(ad_df_raw, ['Total Sales', 'Revenue', '7 Day Total Sales'])
-    ad_spend_col = find_robust_col(ad_df_raw, ['Spend', 'Cost'])
-    biz_sales_col = find_robust_col(biz_df_raw, ['Ordered Product Sales', 'Revenue'])
-
-    # 2. Inventory Processing (FIXED FOR ASIN MAPPING)
-    inv_summary = None
-    if inv_df_raw is not None:
-        # Standardize inventory columns to lowercase
-        inv_df_raw.columns = [str(c).strip().lower() for c in inv_df_raw.columns]
+        # 2. Identify Columns
+        biz_asin = find_robust_col(biz_df, ['asin', 'child asin'])
+        biz_sales = find_robust_col(biz_df, ['ordered product sales', 'revenue'])
+        biz_units = find_robust_col(biz_df, ['units ordered'])
+        biz_title = find_robust_col(biz_df, ['title', 'item name'])
         
-        # Mapping specifically based on your .txt headers: 'asin' and 'quantity available'
-        inv_asin_key = 'asin'
-        inv_qty_key = 'quantity available'
+        ad_asin = find_robust_col(ad_df, ['advertised asin'])
+        ad_sales = find_robust_col(ad_df, ['total sales', '7 day total sales'])
+        ad_spend = find_robust_col(ad_df, ['spend'])
+
+        # 3. Data Cleaning
+        biz_df[biz_sales] = biz_df[biz_sales].apply(clean_numeric)
+        ad_df[ad_sales] = ad_df[ad_sales].apply(clean_numeric)
+        ad_df[ad_spend] = ad_df[ad_spend].apply(clean_numeric)
+
+        # 4. Aggregation & Merge
+        ad_summary = ad_df.groupby(ad_asin)[[ad_sales, ad_spend]].sum().reset_index()
+        merged = pd.merge(biz_df, ad_summary, left_on=biz_asin, right_on=ad_asin, how='left').fillna(0)
+        merged = pd.merge(merged, inv_summary, left_on=biz_asin, right_on='ASIN_KEY', how='left').fillna(0)
         
-        if inv_asin_key in inv_df_raw.columns and inv_qty_key in inv_df_raw.columns:
-            # Aggregate by ASIN: Summing stock for all SKUs tied to the same ASIN 
-            inv_summary = inv_df_raw.groupby(inv_asin_key)[inv_qty_key].sum().fillna(0).reset_index()
-            inv_summary.columns = ['INV_ASIN', 'Available_Inventory']
+        merged['Brand'] = merged[biz_title].apply(get_brand_robust)
+        merged['Organic Sales'] = merged[biz_sales] - merged[ad_sales]
+        merged['TACOS'] = (merged[ad_spend] / merged[biz_sales]).replace([np.inf, -np.inf], 0).fillna(0)
 
-    # 3. Clean Metrics
-    if ad_sales_col: ad_df_raw[ad_sales_col] = ad_df_raw[ad_sales_col].apply(clean_numeric)
-    if ad_spend_col: ad_df_raw[ad_spend_col] = ad_df_raw[ad_spend_col].apply(clean_numeric)
-    if biz_sales_col: biz_df_raw[biz_sales_col] = biz_df_raw[biz_sales_col].apply(clean_numeric)
-    biz_df_raw['Brand'] = biz_df_raw[biz_title_col].apply(get_brand_robust) if biz_title_col else "Unmapped"
+    # --- TABS INTERFACE ---
+    tab1, tab2, tab3 = st.tabs(["🌎 Global Summary", "🏷️ Brand Overview", "🎯 Detailed ASIN Audit"])
 
-    # 4. Aggregation of Ad Data
-    ad_asin_total = ad_df_raw.groupby(ad_asin_col).agg({
-        ad_sales_col: 'sum', ad_spend_col: 'sum'
-    }).reset_index()
+    with tab1:
+        st.subheader("Account-Level Totals")
+        total_rev = merged[biz_sales].sum()
+        total_ad_rev = merged[ad_sales].sum()
+        total_spend = merged[ad_spend].sum()
+        avg_tacos = (total_spend / total_rev) if total_rev > 0 else 0
 
-    # 5. Merge Strategy (ASIN to ASIN)
-    # Join Biz Report to Ad Report
-    merged_df = pd.merge(biz_df_raw, ad_asin_total, left_on=biz_asin_col, right_on=ad_asin_col, how='left').fillna(0)
-    
-    # Join Inventory strictly by ASIN
-    if inv_summary is not None:
-        merged_df = pd.merge(merged_df, inv_summary, left_on=biz_asin_col, right_on='INV_ASIN', how='left')
-        merged_df['Available_Inventory'] = merged_df['Available_Inventory'].fillna(0).astype(int)
-    else:
-        merged_df['Available_Inventory'] = 0
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Sales", f"{total_rev:,.2f}")
+        c2.metric("Ad Sales", f"{total_ad_rev:,.2f}")
+        c3.metric("Total Spend", f"{total_spend:,.2f}")
+        c4.metric("Total TACOS", f"{avg_tacos:.2%}")
 
-    # 6. Final Calculations
-    merged_df['Organic Sales'] = merged_df[biz_sales_col] - merged_df[ad_sales_col]
-    merged_df['DRR'] = merged_df[biz_sales_col] / 30
-    merged_df['Ad Contribution %'] = (merged_df[ad_sales_col] / merged_df[biz_sales_col]).replace([np.inf, -np.inf], 0).fillna(0)
-    merged_df['TACOS'] = (merged_df[ad_spend_col] / merged_df[biz_sales_col]).replace([np.inf, -np.inf], 0).fillna(0)
+    with tab2:
+        st.subheader("Performance by Brand")
+        brand_summary = merged.groupby('Brand').agg({
+            biz_sales: 'sum',
+            ad_sales: 'sum',
+            ad_spend: 'sum',
+            'Stock': 'sum'
+        }).reset_index()
+        
+        brand_summary['TACOS'] = (brand_summary[ad_spend] / brand_summary[biz_sales]).fillna(0)
+        brand_summary['Organic Sales'] = brand_summary[biz_sales] - brand_summary[ad_sales]
+        
+        st.dataframe(
+            brand_summary.sort_values(by=biz_sales, ascending=False).style.format({
+                biz_sales: '{:,.2f}', ad_sales: '{:,.2f}', ad_spend: '{:,.2f}', 'TACOS': '{:.2%}'
+            }), 
+            use_container_width=True, hide_index=True
+        )
 
-    # 7. UI Display
-    table_df = merged_df.rename(columns={
-        biz_asin_col: 'ASIN', 
-        biz_title_col: 'Item Name', 
-        biz_sales_col: 'Total Sales',
-        ad_sales_col: 'Ad Sales', 
-        ad_spend_col: 'Ad Spend', 
-        'Available_Inventory': 'Stock'
-    })
+    with tab3:
+        st.subheader("Item-Level Audit")
+        display_cols = ['Brand', biz_asin, biz_title, 'Stock', biz_sales, ad_sales, ad_spend, 'Organic Sales', 'TACOS']
+        st.dataframe(
+            merged[display_cols].sort_values(by=biz_sales, ascending=False).style.format({
+                biz_sales: '{:,.2f}', ad_sales: '{:,.2f}', ad_spend: '{:,.2f}', 'TACOS': '{:.2%}'
+            }), 
+            use_container_width=True, hide_index=True
+        )
 
-    # Prepare specific columns for display
-    cols = ['ASIN', 'Item Name', 'Stock', 'Total Sales', 'DRR', 'Ad Sales', 'Ad Spend', 'Organic Sales', 'Ad Contribution %', 'TACOS']
-    
-    st.subheader("Final ASIN Audit")
-    st.dataframe(table_df[cols].sort_values(by='Total Sales', ascending=False), use_container_width=True, hide_index=True)
-
-    # Export
+    # --- EXPORT CENTER ---
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        table_df[cols].to_excel(writer, sheet_name='Audit', index=False)
-    st.sidebar.download_button("📥 Download Master Report", data=output.getvalue(), file_name="Amazon_ASIN_Audit.xlsx")
+        brand_summary.to_excel(writer, sheet_name='Brand_Summary', index=False)
+        merged[display_cols].to_excel(writer, sheet_name='ASIN_Audit', index=False)
+    
+    st.sidebar.markdown("---")
+    st.sidebar.download_button(
+        label="📥 Download Master Report (Excel)",
+        data=output.getvalue(),
+        file_name="Amazon_Performance_Master.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+    # Mapping Health Check
+    unmapped = merged[merged['Brand'] == 'Unmapped']
+    if not unmapped.empty:
+        st.sidebar.warning(f"Note: {len(unmapped)} ASINs were unmapped. Check naming consistency.")
 
 else:
-    st.warning("Please upload the Ad Report, Business Report, and the .txt Inventory Report.")
+    st.info("Please upload the Advertising, Business, and Inventory files to begin.")
